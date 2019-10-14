@@ -85,28 +85,21 @@ render window = do
   SDL.glSwapWindow window
   where myVertices :: [OpenGL.Vertex3 OpenGL.GLfloat]
         myVertices = [ OpenGL.Vertex3 x y 0.0 | (x,y) <- zip [-1.0, 1.0, 1.0, -1.0] [-1.0, -1.0, 1.0, 1.0] ]
-               
-main :: IO ()
-main = do
-  SDL.initialize [SDL.InitVideo]
-  window <- SDL.createWindow (Text.pack "Mandelbrot") myWindowConfig
-  SDL.showWindow window
-  SDL.glCreateContext window
-  
+
+loadShaderPair :: String -> String -> IO OpenGL.Program
+loadShaderPair fragmentShader vertexShader = do
   frag <- OpenGL.createShader OpenGL.FragmentShader
-  fragSource <- readFile "Main.frag"
+  fragSource <- readFile fragmentShader
   OpenGL.shaderSourceBS frag $= OpenGL.packUtf8 fragSource
   OpenGL.compileShader frag
   status <- get $ OpenGL.compileStatus frag
   unless status $ putStrLn "Error compiling fragment shader."
-
   vert <- OpenGL.createShader OpenGL.VertexShader
-  vertSource <- readFile "Main.vert"
+  vertSource <- readFile vertexShader
   OpenGL.shaderSourceBS vert $= OpenGL.packUtf8 vertSource
   OpenGL.compileShader vert
   status <- get $ OpenGL.compileStatus vert
   unless status $ putStrLn "Error compiling vertex shader."
-
   program <- OpenGL.createProgram
   OpenGL.attachShader program frag
   OpenGL.attachShader program vert
@@ -117,6 +110,15 @@ main = do
   status <- get $ OpenGL.validateStatus program
   log <- get $ OpenGL.programInfoLog program
   unless status $ putStrLn log
+  return program
+                     
+main :: IO ()
+main = do
+  SDL.initialize [SDL.InitVideo]
+  window <- SDL.createWindow (Text.pack "Mandelbrot") myWindowConfig
+  SDL.showWindow window
+  SDL.glCreateContext window
+  program <- loadShaderPair "Main.frag" "Main.vert"
   OpenGL.currentProgram $= Just program
   
   setUniform program "resolution" (OpenGL.Vector2
