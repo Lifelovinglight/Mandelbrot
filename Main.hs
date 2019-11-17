@@ -13,10 +13,15 @@ import Data.Foldable
 import Data.Traversable
 import Data.Monoid
 import Control.Applicative
+import Control.Arrow
 
 machine :: (Monad m) => (a -> m b) -> (a -> m c) -> a -> m a
 machine fa fb value = fa value >> fb value >> return value
 fa >>& fb = machine fa fb
+
+machineHalt :: (Monad m) => (a -> m b) -> (a -> m c) -> a -> m c
+machineHalt fa fb value = fa value >> fb value
+fa >&/ fb = machineHalt fa fb
 
 screenWidth, screenHeight :: CInt
 (screenWidth, screenHeight) = (1366, 768)
@@ -105,16 +110,16 @@ loadShaderPair :: String -> String -> OpenGL.Program -> IO ()
 loadShaderPair fragmentShader vertexShader program = do
   OpenGL.createShader OpenGL.FragmentShader
     >>= loadShaderSource fragmentShader
-    >>& OpenGL.attachShader program
+    >&/ OpenGL.attachShader program
   OpenGL.createShader OpenGL.VertexShader
     >>= loadShaderSource vertexShader
-    >>& OpenGL.attachShader program
+    >&/ OpenGL.attachShader program
   OpenGL.linkProgram program
   checkStatus (OpenGL.linkStatus program) "Error linking shader program." 
   OpenGL.validateProgram program
   checkStatus (OpenGL.validateStatus program) =<< get (OpenGL.programInfoLog program)
 
-initializeUniforms :: OpenGL.Program -> IO OpenGL.Program
+initializeUniforms :: OpenGL.Program -> IO ()
 initializeUniforms =
   setUniform "resolution" (OpenGL.Vector2
                                     ((fromIntegral screenWidth) :: OpenGL.GLfloat)
@@ -122,13 +127,13 @@ initializeUniforms =
   >>& setUniform "zoom" (1.0 :: OpenGL.GLfloat)
   >>& setUniform "panx" (0.0 :: OpenGL.GLfloat)
   >>& setUniform "pany" (0.0 :: OpenGL.GLfloat)
-  >>& setUniform "depth" (170 :: OpenGL.GLint)
+  >&/ setUniform "depth" (170 :: OpenGL.GLint)
 
 mainLoop :: OpenGL.Program -> SDL.Window -> IO ()
-mainLoop program window = void . iterateWhile not $ do
-  event <- SDL.waitEvent
-  maybe mempty ((>> render window) . handleKeypress program) (keyPressed event >>= keyMapping)
-  return $ SDL.QuitEvent == SDL.eventPayload event
+mainLoop program window = void . iterateWhile not $
+  SDL.waitEvent
+  >>= (maybe mempty ((>> render window) . handleKeypress program) . ((>>= keyMapping) . keyPressed))
+  >&/ (return . (SDL.QuitEvent ==) . SDL.eventPayload)
     
 main :: IO ()
 main = do
