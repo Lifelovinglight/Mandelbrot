@@ -14,6 +14,9 @@ import Data.Traversable
 import Data.Monoid
 import Control.Applicative
 
+machine :: (Monad m) => (a -> m b) -> (a -> m c) -> a -> m a
+machine fa fb value = fa value >> fb value >> return value
+fa >>& fb = machine fa fb
 
 screenWidth, screenHeight :: CInt
 (screenWidth, screenHeight) = (1366, 768)
@@ -40,11 +43,14 @@ keyPressed event =
       else Nothing
     _ -> Nothing
 
-setUniform :: (OpenGL.Uniform a) => OpenGL.Program -> String -> a -> IO ()
-setUniform program name value = get (OpenGL.uniformLocation program name) >>= ($= value) . OpenGL.uniform
+setUniform :: (OpenGL.Uniform a) => String -> a -> OpenGL.Program -> IO ()
+setUniform name value program = get (OpenGL.uniformLocation program name) >>= ($= value) . OpenGL.uniform
   
-modUniform :: (OpenGL.Uniform a) => OpenGL.Program -> String -> (a -> a) -> IO ()
-modUniform program name fn = get (OpenGL.uniformLocation program name) >>= ($~ fn) . OpenGL.uniform 
+modUniform :: (OpenGL.Uniform a) => String -> (a -> a) -> OpenGL.Program -> IO ()
+modUniform name fn program = get (OpenGL.uniformLocation program name) >>= ($~ fn) . OpenGL.uniform
+
+setCurrentProgram :: OpenGL.Program -> IO ()
+setCurrentProgram = (OpenGL.currentProgram $=) . Just
 
 data UserAction = PanLeft
                 | PanRight
@@ -67,14 +73,14 @@ keyMapping SDL.KeycodeMinus = Just DecreaseDepth
 keyMapping _ = Nothing
 
 handleKeypress :: OpenGL.Program -> UserAction -> IO ()
-handleKeypress program ZoomIn = modUniform program "zoom" (subtract zoomFactor)
-handleKeypress program ZoomOut = modUniform program "zoom" (+ zoomFactor)
-handleKeypress program PanUp = modUniform program "pany" (+ panFactor)
-handleKeypress program PanDown = modUniform program "pany" (subtract panFactor)
-handleKeypress program PanRight = modUniform program "panx" (+ panFactor)
-handleKeypress program PanLeft = modUniform program "panx" (subtract panFactor)
-handleKeypress program IncreaseDepth = modUniform program "depth" (+ depthFactor)
-handleKeypress program DecreaseDepth = modUniform program "depth" (subtract depthFactor)
+handleKeypress program ZoomIn = modUniform "zoom" (subtract zoomFactor) program
+handleKeypress program ZoomOut = modUniform "zoom" (+ zoomFactor) program
+handleKeypress program PanUp = modUniform "pany" (+ panFactor) program
+handleKeypress program PanDown = modUniform "pany" (subtract panFactor) program
+handleKeypress program PanRight = modUniform "panx" (+ panFactor) program
+handleKeypress program PanLeft = modUniform "panx" (subtract panFactor) program
+handleKeypress program IncreaseDepth = modUniform "depth" (+ depthFactor) program
+handleKeypress program DecreaseDepth = modUniform "depth" (subtract depthFactor) program
 
 render :: SDL.Window -> IO ()
 render window = do
@@ -86,54 +92,55 @@ render window = do
   where myVertices :: [OpenGL.Vertex3 OpenGL.GLfloat]
         myVertices = [ OpenGL.Vertex3 x y 0.0 | (x,y) <- zip [-1.0, 1.0, 1.0, -1.0] [-1.0, -1.0, 1.0, 1.0] ]
 
-loadShaderPair :: String -> String -> IO OpenGL.Program
-loadShaderPair fragmentShader vertexShader = do
-  frag <- OpenGL.createShader OpenGL.FragmentShader
-  fragSource <- readFile fragmentShader
-  OpenGL.shaderSourceBS frag $= OpenGL.packUtf8 fragSource
-  OpenGL.compileShader frag
-  status <- get $ OpenGL.compileStatus frag
-  unless status $ putStrLn "Error compiling fragment shader."
-  vert <- OpenGL.createShader OpenGL.VertexShader
-  vertSource <- readFile vertexShader
-  OpenGL.shaderSourceBS vert $= OpenGL.packUtf8 vertSource
-  OpenGL.compileShader vert
-  status <- get $ OpenGL.compileStatus vert
-  unless status $ putStrLn "Error compiling vertex shader."
-  program <- OpenGL.createProgram
-  OpenGL.attachShader program frag
-  OpenGL.attachShader program vert
+loadShaderSource :: String -> OpenGL.Shader -> IO ()
+loadShaderSource filePath shader = do
+  (OpenGL.shaderSourceBS shader $=) . OpenGL.packUtf8 =<< readFile filePath
+  OpenGL.compileShader shader
+  checkStatus (OpenGL.compileStatus shader) $ "Error compiling " <> filePath
+  
+checkStatus :: GettableStateVar Bool -> String -> IO ()
+checkStatus getter errormsg = get $ getter >>= flip unless (putStrLn errormsg)
+
+loadShaderPair :: String -> String -> OpenGL.Program -> IO ()
+loadShaderPair fragmentShader vertexShader program = do
+  OpenGL.createShader OpenGL.FragmentShader
+    >>= loadShaderSource fragmentShader
+    >>& OpenGL.attachShader program
+  OpenGL.createShader OpenGL.VertexShader
+    >>= loadShaderSource vertexShader
+    >>& OpenGL.attachShader program
   OpenGL.linkProgram program
-  status <- get $ OpenGL.linkStatus program
-  unless status $ putStrLn "Error linking shader program."
+  checkStatus (OpenGL.linkStatus program) "Error linking shader program." 
   OpenGL.validateProgram program
-  status <- get $ OpenGL.validateStatus program
-  log <- get $ OpenGL.programInfoLog program
-  unless status $ putStrLn log
-  return program
-                     
+  checkStatus (OpenGL.validateStatus program) =<< get (OpenGL.programInfoLog program)
+
+initializeUniforms :: OpenGL.Program -> IO OpenGL.Program
+initializeUniforms =
+  setUniform "resolution" (OpenGL.Vector2
+                                    ((fromIntegral screenWidth) :: OpenGL.GLfloat)
+                                    ((fromIntegral screenHeight) :: OpenGL.GLfloat))
+  >>& setUniform "zoom" (1.0 :: OpenGL.GLfloat)
+  >>& setUniform "panx" (0.0 :: OpenGL.GLfloat)
+  >>& setUniform "pany" (0.0 :: OpenGL.GLfloat)
+  >>& setUniform "depth" (170 :: OpenGL.GLint)
+
+mainLoop :: OpenGL.Program -> SDL.Window -> IO ()
+mainLoop program window = void . iterateWhile not $ do
+  event <- SDL.waitEvent
+  maybe mempty ((>> render window) . handleKeypress program) (keyPressed event >>= keyMapping)
+  return $ SDL.QuitEvent == SDL.eventPayload event
+    
 main :: IO ()
 main = do
   SDL.initialize [SDL.InitVideo]
   window <- SDL.createWindow (Text.pack "Mandelbrot") myWindowConfig
-  SDL.showWindow window
-  SDL.glCreateContext window
-  program <- loadShaderPair "Main.frag" "Main.vert"
-  OpenGL.currentProgram $= Just program
-  
-  setUniform program "resolution" (OpenGL.Vector2
-                                    ((fromIntegral screenWidth) :: OpenGL.GLfloat)
-                                    ((fromIntegral screenHeight) :: OpenGL.GLfloat))
-  setUniform program "zoom" (1.0 :: OpenGL.GLfloat)
-  setUniform program "panx" (0.0 :: OpenGL.GLfloat)
-  setUniform program "pany" (0.0 :: OpenGL.GLfloat)
-  setUniform program "depth" (170 :: OpenGL.GLint)
-
+    >>= SDL.showWindow
+    >>& SDL.glCreateContext
+  program <- OpenGL.createProgram
+    >>= loadShaderPair "Main.frag" "Main.vert"
+    >>& setCurrentProgram
+    >>& initializeUniforms
   render window
-  iterateWhile not $ do
-    event <- SDL.waitEvent
-    maybe mempty ((>> render window) . handleKeypress program) (keyPressed event >>= keyMapping) 
-    return $ SDL.QuitEvent == SDL.eventPayload event
-    
+  mainLoop program window
   SDL.destroyWindow window
   SDL.quit
